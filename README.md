@@ -31,7 +31,7 @@ pip install -r requirements.txt
 1. **Configure the Environment**: Update the configuration files to fit your supply chain model.
 2. **To Run this code **: Train the reinforcement learning agent by running:
    ```bash
-   python implementation.py --config config.yaml
+   python implementation.py
    ```
 
 ---
