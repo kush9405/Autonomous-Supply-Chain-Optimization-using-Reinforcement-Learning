@@ -1,6 +1,6 @@
 Here is a revised version of the `README.md` file ensuring all Markdown syntax is properly formatted and functional:
 
-```markdown
+
 # Autonomous Supply Chain Optimization using Reinforcement Learning
 
 This repository implements a reinforcement learning-based approach to optimize supply chains. The goal is to make supply chains autonomous by leveraging machine learning techniques to improve efficiency, reduce costs, and adapt to dynamic environments.
