@@ -1,5 +1,3 @@
-Here is a revised version of the `README.md` file ensuring all Markdown syntax is properly formatted and functional:
-
 
 # Autonomous Supply Chain Optimization using Reinforcement Learning
 
