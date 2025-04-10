@@ -29,17 +29,9 @@ pip install -r requirements.txt
 ## Usage
 
 1. **Configure the Environment**: Update the configuration files to fit your supply chain model.
-2. **Run Training**: Train the reinforcement learning agent by running:
+2. **To Run this code **: Train the reinforcement learning agent by running:
    ```bash
-   python train.py --config config.yaml
-   ```
-3. **Evaluate Performance**: Test the trained model using:
-   ```bash
-   python evaluate.py --model path_to_model --config config.yaml
-   ```
-4. **Visualize Results**: Generate visualizations for evaluation:
-   ```bash
-   python visualize.py --data results.csv
+   python implementation.py --config config.yaml
    ```
 
 ---
