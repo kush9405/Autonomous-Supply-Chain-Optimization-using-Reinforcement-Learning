@@ -48,7 +48,7 @@ class SupplyChainEnv(gym.Env):
         self.observation_space = spaces.Box(
             low=0,  # Inventory cannot be negative. Cash cannot be negative
             high=WAREHOUSE_CAPACITY,  # Inventory has a capacity limit
-            shape=(inventory_state_size + 1,),  # +1 for cash on hand.  Important: shape needs to be a tuple!
+            shape=(inventory_state_size + NUM_PRODUCTS + NUM_PRODUCTS + 1,),  # Warehouse+DC inventory, backorders, product prices, cash
             dtype=np.float32
         )
 
@@ -89,7 +89,12 @@ class SupplyChainEnv(gym.Env):
     def _get_obs(self):
         # Combine warehouse and distribution center inventory into a single state vector.
         inventory_state = np.concatenate([self.warehouse_inventory, self.distribution_center_inventory])
-        return np.concatenate([inventory_state, [self.cash_on_hand]]).astype(np.float32)
+        return np.concatenate([
+            inventory_state,
+            self.demand_backorders,
+            self.product_prices,
+            [self.cash_on_hand]
+        ]).astype(np.float32)
 
     def _get_info(self):
         return {
@@ -140,19 +145,19 @@ class SupplyChainEnv(gym.Env):
         # 6. Calculate Costs
         holding_cost, ordering_cost, shortage_cost, transport_cost = self._calculate_costs(order_quantities)
 
-        # Define order_cost before reward calculation
         order_cost = np.sum(SUPPLIER_PRODUCT_COSTS * order_quantities)
-
-        # 7. Calculate Reward with updated reward function
+        inventory_penalty = np.sum(self.warehouse_inventory + self.distribution_center_inventory)
+        fulfilled_demand = revenue / np.mean(self.product_prices) if np.mean(self.product_prices) > 0 else 0
+ 
         reward = (
-            revenue
-            - holding_cost
+            0.5 * revenue
+            - 0.5 * holding_cost
             - ordering_cost
             - shortage_cost
             - transport_cost
-            - 0.3 * np.sum(self.demand_backorders)  # Penalty for backorders
-            - 0.1 * np.sum(self.distribution_center_inventory)  # Softer inventory penalty
-            - 0.02 * order_cost  # Penalty based on supplier costs
+            - 0.1 * inventory_penalty  # Penalty for overstocking
+            - 0.01 * order_cost        # Cost sensitivity
+            + 0.2 * fulfilled_demand   # Reward for satisfying demand
         )
 
         # 8. Update Cash
@@ -368,7 +373,7 @@ class SupplyChainEnv(gym.Env):
                       np.sum(self.distribution_center_inventory * HOLDING_COST_PER_UNIT)
         ordering_cost = np.sum(order_quantities > 0) * ORDERING_COST_PER_ORDER  # Simplified: cost per order
         shortage_cost = np.sum(self.demand_backorders * SHORTAGE_COST_PER_UNIT)
-        transport_cost = np.sum(self.shipment_dc_retailer) * TRANSPORT_COST_PER_UNIT_DISTANCE
+        transport_cost = sum(quantity for _, quantity, _ in self.shipment_dc_retailer) * TRANSPORT_COST_PER_UNIT_DISTANCE
 
         return holding_cost, ordering_cost, shortage_cost, transport_cost
 
@@ -394,7 +399,7 @@ env = make_vec_env(lambda: SupplyChainEnv(render_mode=None), n_envs=1)
 env = VecNormalize(env, norm_obs=True, norm_reward=True)
 
 # Train the RL agent
-model = PPO("MlpPolicy", env, verbose=1)
+model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_logs/")
 model.learn(total_timesteps=250000)
 
 # Save the trained model
