@@ -7,6 +7,8 @@ from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
 from statsmodels.tsa.arima.model import ARIMA
 import matplotlib.pyplot as plt
+from stable_baselines3.common.callbacks import EvalCallback
+from torch.utils.tensorboard import SummaryWriter
 
 # --- Supply Chain Parameters ---
 NUM_SUPPLIERS =2
@@ -77,7 +79,8 @@ class SupplyChainEnv(gym.Env):
         self.demand_backorders = np.zeros(NUM_PRODUCTS, dtype=np.float32)   #Demand that is yet to be fulfilled
         self.cash_on_hand = 20000  # Increased initial cash
         self.current_day = 0
-
+        self.writer = SummaryWriter(log_dir="./ppo_logs/env_metrics")
+ 
         # Incoming shipments (supplier, product, quantity, arrival_time)
         self.incoming_shipments = []
         self.shipment_dc_retailer = [] # warehouse to DC
@@ -162,6 +165,20 @@ class SupplyChainEnv(gym.Env):
 
         # 8. Update Cash
         self.cash_on_hand += reward
+ 
+        # Log metrics to TensorBoard
+        self.writer.add_scalar("env/reward", reward, self.current_day)
+        self.writer.add_scalar("env/cash_on_hand", self.cash_on_hand, self.current_day)
+        self.writer.add_scalar("env/revenue", revenue, self.current_day)
+        self.writer.add_scalar("env/shortage_cost", shortage_cost, self.current_day)
+        self.writer.add_scalar("env/holding_cost", holding_cost, self.current_day)
+        self.writer.add_scalar("env/ordering_cost", ordering_cost, self.current_day)
+        self.writer.add_scalar("env/transport_cost", transport_cost, self.current_day)
+        for i in range(NUM_PRODUCTS):
+            self.writer.add_scalar(f"env/warehouse_inventory/product_{i+1}", self.warehouse_inventory[i], self.current_day)
+            self.writer.add_scalar(f"env/dc_inventory/product_{i+1}", self.distribution_center_inventory[i], self.current_day)
+            self.writer.add_scalar(f"env/demand_backorders/product_{i+1}", self.demand_backorders[i], self.current_day)
+            self.writer.add_scalar(f"env/prices/product_{i+1}", self.product_prices[i], self.current_day)
 
         # 9. Increment Day
         self.current_day += 1
@@ -392,15 +409,28 @@ class SupplyChainEnv(gym.Env):
         plt.show()
 
     def close(self):
-        pass
+        self.writer.close()
 
 # --- Example Usage ---
 env = make_vec_env(lambda: SupplyChainEnv(render_mode=None), n_envs=1)
 env = VecNormalize(env, norm_obs=True, norm_reward=True)
 
+# Set up evaluation environment and callback
+eval_env = make_vec_env(lambda: SupplyChainEnv(render_mode=None), n_envs=1)
+eval_env = VecNormalize(eval_env, training=False, norm_obs=True, norm_reward=True)
+
+eval_callback = EvalCallback(
+    eval_env,
+    best_model_save_path='./logs/',
+    log_path='./logs/',
+    eval_freq=10000,
+    deterministic=True,
+    render=False
+)
+
 # Train the RL agent
 model = PPO("MlpPolicy", env, verbose=1, tensorboard_log="./ppo_logs/")
-model.learn(total_timesteps=250000)
+model.learn(total_timesteps=250000, tb_log_name="run_1", callback=eval_callback)
 
 # Save the trained model
 model.save("supply_chain_agent")
