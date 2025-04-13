@@ -9,8 +9,8 @@ from statsmodels.tsa.arima.model import ARIMA
 import matplotlib.pyplot as plt
 
 # --- Supply Chain Parameters ---
-NUM_SUPPLIERS =3
-NUM_PRODUCTS = 1
+NUM_SUPPLIERS =2
+NUM_PRODUCTS = 3
 WAREHOUSE_CAPACITY = 100  # Example
 DISTRIBUTION_CENTER_CAPACITY = 25 #Example
 
@@ -27,6 +27,7 @@ DEMAND_STD_DEV = 2  # Example
 SUPPLIER_LEAD_TIMES = [random.randint(1, 3) for _ in range(NUM_SUPPLIERS)]  # Random lead times between 2 and 6 days
 TRANSPORT_LEAD_TIME_WAREHOUSE_TO_DC = 1  # Days
 PRICING_REQUEST_APPROVAL_PROBABILITY = 0.8 #probability of getting  the request accepted
+SUPPLIER_PRODUCT_COSTS = np.random.randint(8, 20, size=(NUM_SUPPLIERS, NUM_PRODUCTS))
 
 class SupplyChainEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
@@ -122,8 +123,7 @@ class SupplyChainEnv(gym.Env):
         # Reshape the ordering actions into a (NUM_SUPPLIERS, NUM_PRODUCTS) array
         order_quantities = order_actions.reshape((NUM_SUPPLIERS, NUM_PRODUCTS))
 
-        # 1. Place Orders with Suppliers
-        self._place_orders(order_quantities)
+        # 1. Place Orders with Suppliers (removed initial order placement)
 
         # 2. Process Incoming Shipments
         self._process_incoming_shipments()
@@ -140,14 +140,19 @@ class SupplyChainEnv(gym.Env):
         # 6. Calculate Costs
         holding_cost, ordering_cost, shortage_cost, transport_cost = self._calculate_costs(order_quantities)
 
-        # 7. Calculate Reward
+        # Define order_cost before reward calculation
+        order_cost = np.sum(SUPPLIER_PRODUCT_COSTS * order_quantities)
+
+        # 7. Calculate Reward with updated reward function
         reward = (
             revenue
-            - (holding_cost + ordering_cost + shortage_cost + transport_cost)
-            - 0.5 * np.sum(self.distribution_center_inventory)  # Penalize excessive inventory
-            - 0.3 * np.sum(self.demand_backorders)  # Penalize backorders
-            + 1.0 * revenue  # Stronger incentive for revenue
-            + 0.1 * np.sum(order_quantities)  # Incentivize placing orders
+            - holding_cost
+            - ordering_cost
+            - shortage_cost
+            - transport_cost
+            - 0.3 * np.sum(self.demand_backorders)  # Penalty for backorders
+            - 0.1 * np.sum(self.distribution_center_inventory)  # Softer inventory penalty
+            - 0.02 * order_cost  # Penalty based on supplier costs
         )
 
         # 8. Update Cash
@@ -175,26 +180,41 @@ class SupplyChainEnv(gym.Env):
             # Use RL model to suggest order quantities
             suggested_action, _ = model.predict(self._get_obs())
             suggested_order_quantities = suggested_action[:self.order_action_size].reshape((NUM_SUPPLIERS, NUM_PRODUCTS))
-
+ 
+            # Convert suggested quantities to integers and validate
+            suggested_order_quantities = np.rint(suggested_order_quantities).astype(int)
+            suggested_order_quantities = np.clip(suggested_order_quantities, 0, WAREHOUSE_CAPACITY)
+ 
+            # Initialize order_quantities array with suggested values
+            order_quantities = suggested_order_quantities.copy()
+ 
             # Allow the owner to input custom order quantities
             print("\nEnter custom order quantities for each supplier and product (suggested quantities are shown):")
             for supplier in range(NUM_SUPPLIERS):
                 for product in range(NUM_PRODUCTS):
                     try:
-                        suggested_quantity = int(suggested_order_quantities[supplier, product])
-                        quantity = int(input(f"Supplier {supplier + 1}, Product {product + 1} (Suggested: {suggested_quantity}): "))
-                        order_quantities[supplier, product] = max(0, quantity)  # Ensure non-negative quantities
+                        suggested_quantity = suggested_order_quantities[supplier, product]
+                        quantity = input(f"Supplier {supplier + 1}, Product {product + 1} (Suggested: {suggested_quantity}): ").strip()
+                        if quantity == "":
+                            # Default to suggested quantity if input is empty
+                            order_quantities[supplier, product] = suggested_quantity
+                        else:
+                            # Use user-provided quantity
+                            order_quantities[supplier, product] = max(0, int(quantity))  # Ensure non-negative quantities
                     except ValueError:
                         print("Invalid input. Defaulting to suggested quantity.")
                         order_quantities[supplier, product] = suggested_quantity
-
-            # Place the custom orders
-            self._place_orders(order_quantities)
+ 
+            # Place the custom orders and exit early to avoid fallback ordering
+            self._place_orders(order_quantities,user=True)
+            return self._get_obs(), reward, False, False, self._get_info()
         else:
             print("Owner decided not to order goods. Using RL-based fallback ordering.")
             # Use RL-based fallback ordering
             fallback_action, _ = model.predict(self._get_obs())  # Predict action using the RL model
             fallback_order_quantities = fallback_action[:self.order_action_size].reshape((NUM_SUPPLIERS, NUM_PRODUCTS))
+            fallback_order_quantities = np.rint(fallback_order_quantities).astype(int)  # Ensure integers
+            fallback_order_quantities = np.clip(fallback_order_quantities, 0, WAREHOUSE_CAPACITY)  # Validate
             self._place_orders(fallback_order_quantities)
 
         # Check the termination
@@ -217,7 +237,7 @@ class SupplyChainEnv(gym.Env):
 
         return observation, reward, terminated, False, info
 
-    def _place_orders(self, order_quantities):
+    def _place_orders(self, order_quantities,user=False):
         """Places orders with suppliers.
 
         Args:
@@ -228,14 +248,14 @@ class SupplyChainEnv(gym.Env):
         total_ordering_cost = 0
         for supplier in range(NUM_SUPPLIERS):
             for product in range(NUM_PRODUCTS):
-                quantity = order_quantities[supplier, product]
+                quantity = int(order_quantities[supplier, product])  # Convert to integer
 
                 # Automatically place orders if inventory is critically low
-                if self.distribution_center_inventory[product] < AVG_DEMAND_PER_PRODUCT:
+                if not user:
                     quantity = max(quantity, AVG_DEMAND_PER_PRODUCT - self.distribution_center_inventory[product])
 
                 # Ensure we have enough cash to place the order
-                product_cost = 10  # Assuming product price = 10
+                product_cost = SUPPLIER_PRODUCT_COSTS[supplier, product]
                 if self.cash_on_hand >= quantity * product_cost:
                     self.cash_on_hand -= quantity * product_cost
                     total_ordering_cost += quantity * product_cost
@@ -263,6 +283,7 @@ class SupplyChainEnv(gym.Env):
 
             #Update Inventory
             self.warehouse_inventory[product] += received
+            print(f"Shipment arrived: Supplier {supplier + 1}, Product {product + 1}, Quantity Received: {received}")
 
             #Update the backorders
             if quantity > available_capacity:
@@ -303,22 +324,24 @@ class SupplyChainEnv(gym.Env):
 
             # Fulfill backorders first
             if self.demand_backorders[product] > 0:
-                delivered = min(demand, self.demand_backorders[product])
+                delivered = min(self.distribution_center_inventory[product], self.demand_backorders[product])
                 self.distribution_center_inventory[product] -= delivered
-                demand -= delivered
                 self.demand_backorders[product] -= delivered
+                total_revenue += delivered * self.product_prices[product]
+                if delivered > 0:
+                    print(f"Sold {delivered} units of Product {product + 1} at price {self.product_prices[product]:.2f}")  # for backorders
+                demand = max(0, demand - delivered)  # Prevent negative demand
 
             # Fulfill remaining demand
             fulfilled = min(demand, self.distribution_center_inventory[product])
             self.distribution_center_inventory[product] -= fulfilled
-            demand -= fulfilled
+            total_revenue += fulfilled * self.product_prices[product]
+            if fulfilled > 0:
+                print(f"Sold {fulfilled} units of Product {product + 1} at price {self.product_prices[product]:.2f}")  # for demand
 
             # Add unmet demand to backorders
-            if demand > 0:
-                self.demand_backorders[product] += demand
-
-            # Calculate revenue
-            total_revenue += fulfilled * self.product_prices[product]
+            if demand > fulfilled:
+                self.demand_backorders[product] += demand - fulfilled
 
         return total_demand, total_revenue
 
@@ -377,5 +400,6 @@ model.learn(total_timesteps=250000)
 # Save the trained model
 model.save("supply_chain_agent")
 
-# Load the trained model
+# Before loading the model at inference, load environment stats
+env = VecNormalize.load("env_stats.pkl", env)
 model = PPO.load("supply_chain_agent")
