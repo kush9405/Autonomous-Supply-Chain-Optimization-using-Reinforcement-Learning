@@ -1,3 +1,4 @@
+from collections import defaultdict
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -27,6 +28,7 @@ DEMAND_STD_DEV = 2  # Example
 SUPPLIER_LEAD_TIMES = [random.randint(1, 3) for _ in range(NUM_SUPPLIERS)]  # Random lead times between 2 and 6 days
 TRANSPORT_LEAD_TIME_WAREHOUSE_TO_DC = 1  # Days
 PRICING_REQUEST_APPROVAL_PROBABILITY = 0.8 #probability of getting  the request accepted
+PRODUCT_LIFESPANS = [7]  # Example lifespan of products in days
 
 class SupplyChainEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
@@ -84,6 +86,9 @@ class SupplyChainEnv(gym.Env):
         # Price of products
         self.product_prices = np.ones(NUM_PRODUCTS, dtype=np.float32) * 10 #inital price for the product
         self.price_change_amount = 0.1  # Amount by which the price can change(10% increase or decrease)
+        self.discounted_inventory = defaultdict(list) # Inventory with expiry dates
+        self.total_waste_cost = 0  # Total cost incurred due to expired products
+        self.base_product_prices = np.copy(self.product_prices)  # To remember original prices
 
     def _get_obs(self):
         # Combine warehouse and distribution center inventory into a single state vector.
@@ -156,6 +161,16 @@ class SupplyChainEnv(gym.Env):
         # 9. Increment Day
         self.current_day += 1
 
+        print(f"Total Waste Cost So Far: ₹{self.total_waste_cost:.2f}")
+        self._print_inventory_lifespan_status()
+
+        # 10. Apply Lifespan-based Discounts
+        self._apply_lifespan_based_discounts()
+
+        # 11. Check for Expired Inventory and Waste Cost
+        self._remove_expired_inventory()
+
+
         # Display the day's summary to the owner
         print(f"\n--- Day {self.current_day} Summary ---")
         print(f"Revenue: {revenue:.2f}")
@@ -168,6 +183,7 @@ class SupplyChainEnv(gym.Env):
         print(f"Warehouse Inventory: {self.warehouse_inventory.tolist()}")
         print(f"Distribution Center Inventory: {self.distribution_center_inventory.tolist()}")
         print(f"Demand Backorders: {self.demand_backorders.tolist()}")
+        print(f"Total Waste Cost So Far: ₹{self.total_waste_cost:.2f}")
 
         # Ask the owner if they want to proceed with ordering goods
         proceed = input("Do you want to proceed with ordering goods for the next day? (yes/no): ").strip().lower()
@@ -278,12 +294,27 @@ class SupplyChainEnv(gym.Env):
             transport = min(self.warehouse_inventory[product], available_capacity)
             self.warehouse_inventory[product] -= transport #Remove form the warehouse
             self.shipment_dc_retailer.append((product, transport, self.current_day+TRANSPORT_LEAD_TIME_WAREHOUSE_TO_DC)) #create the incoming shipment
+        
+        if transport > 0:
+            self.shipment_dc_retailer.append((product, transport, self.current_day + TRANSPORT_LEAD_TIME_WAREHOUSE_TO_DC))
+
 
     def _process_shipment_warehouse_to_dc(self):
         """Processes shipments from warehouse to DC."""
         arrived_shipments = [s for s in self.shipment_dc_retailer if s[2] <= self.current_day]
         for product, quantity, _ in arrived_shipments:
             self.distribution_center_inventory[product] += quantity
+
+            # Assign expiry date and store in discounted inventory
+            lifespan = 7  # Or PRODUCT_LIFESPANS[product] if defined per product
+            expiry_day = self.current_day + lifespan
+            unit_price = self.product_prices[product]
+
+            if quantity > 0:
+                expiry_day = self.current_day + 7  # or use PRODUCT_LIFESPANS[product]
+                unit_price = self.product_prices[product]
+                self.discounted_inventory[product].append((quantity, expiry_day, unit_price, unit_price))  
+                print(f"Added to discounted inventory: Product {product + 1} | Qty: {quantity} | Expires on Day {expiry_day}")
 
         #Remove
         self.shipment_dc_retailer = [s for s in self.shipment_dc_retailer if s[2] > self.current_day]
@@ -300,27 +331,56 @@ class SupplyChainEnv(gym.Env):
         sorted_products = np.argsort(-self.product_prices)
         for product in sorted_products:
             demand = self._forecast_demand(product)
+            total_demand += demand
 
             # Fulfill backorders first
             if self.demand_backorders[product] > 0:
-                delivered = min(demand, self.demand_backorders[product])
-                self.distribution_center_inventory[product] -= delivered
-                demand -= delivered
-                self.demand_backorders[product] -= delivered
+                backorder = self.demand_backorders[product]
+                to_deliver = min(demand, backorder)
+                demand -= to_deliver
+                self.demand_backorders[product] -= to_deliver
+                # Use discounted inventory to fulfill backorders
+                delivered, revenue = self._use_discounted_inventory(product, to_deliver)
+                total_revenue += revenue
 
             # Fulfill remaining demand
-            fulfilled = min(demand, self.distribution_center_inventory[product])
-            self.distribution_center_inventory[product] -= fulfilled
+            fulfilled, revenue = self._use_discounted_inventory(product, demand)
             demand -= fulfilled
+            total_revenue += revenue
 
             # Add unmet demand to backorders
             if demand > 0:
                 self.demand_backorders[product] += demand
 
-            # Calculate revenue
-            total_revenue += fulfilled * self.product_prices[product]
+            # Update DC inventory to reflect what’s actually available
+            self.distribution_center_inventory[product] = sum(q for q, _, _, _ in self.discounted_inventory[product])
 
         return total_demand, total_revenue
+    
+    def _use_discounted_inventory(self, product, demand):
+        fulfilled = 0
+        revenue = 0
+        new_inventory = []
+
+        inventory = sorted(self.discounted_inventory[product], key=lambda x: x[1])  # Sort by expiry date
+
+        for quantity, expiry_day, original_price, discounted_price in inventory:
+            if demand <= 0:
+                new_inventory.append((quantity, expiry_day, original_price, discounted_price))
+                continue
+
+            use_qty = min(demand, quantity)
+            fulfilled += use_qty
+            revenue += use_qty * discounted_price
+            demand -= use_qty
+
+            remaining_qty = quantity - use_qty
+            if remaining_qty > 0:
+                new_inventory.append((remaining_qty, expiry_day, original_price, discounted_price))
+
+        self.discounted_inventory[product] = new_inventory
+        return fulfilled, revenue
+
 
     def _update_prices(self, price_actions):
         """Updates the product prices based on the provided actions and inventory levels."""
@@ -348,10 +408,70 @@ class SupplyChainEnv(gym.Env):
         transport_cost = np.sum(self.shipment_dc_retailer) * TRANSPORT_COST_PER_UNIT_DISTANCE
 
         return holding_cost, ordering_cost, shortage_cost, transport_cost
+    
+    def _apply_lifespan_based_discounts(self):
+        print("\nDiscounted Inventory Updates:")
+        for product, inventory_list in self.discounted_inventory.items():
+            updated_inventory = []
+            for quantity, expiry_day, original_price, _ in inventory_list:
+                days_to_expiry = expiry_day - self.current_day
+
+                if days_to_expiry <= 2:
+                    discounted_price = round(original_price * 0.5, 2)
+                    discount = "50%"
+                elif days_to_expiry <= 5:
+                    discounted_price = round(original_price * 0.8, 2)
+                    discount = "20%"
+                else:
+                    discounted_price = original_price
+                    discount = "0%"
+
+                print(
+                    f"Product {product + 1} | Qty: {quantity} | Expiry in: {days_to_expiry} days | "
+                    f"Original Price: ₹{original_price:.2f} → Discounted: ₹{discounted_price:.2f} ({discount})"
+                )
+
+                if days_to_expiry <= 2:
+                    print(f"Clearance Alert: Product {product} expires in {days_to_expiry} day(s)!")
+
+                updated_inventory.append((quantity, expiry_day, original_price, discounted_price))
+
+            self.discounted_inventory[product] = updated_inventory
+
+    def _remove_expired_inventory(self):
+        """Removes expired products and adds waste cost."""
+        for product in range(NUM_PRODUCTS):
+            new_inventory = []
+            for quantity, expiry_day, original_price, discounted_price in self.discounted_inventory[product]:
+                if expiry_day <= self.current_day:
+                    self.total_waste_cost += quantity * discounted_price
+                else:
+                    new_inventory.append((quantity, expiry_day, original_price, discounted_price))
+            self.discounted_inventory[product] = new_inventory
+
+    
+    def _print_inventory_lifespan_status(self):
+        print("\nInventory Lifespan Status:")
+        for product in range(NUM_PRODUCTS):
+            if self.discounted_inventory[product]:
+                print(f"Product {product + 1} :")
+                for qty, expiry_day, price, _ in sorted(self.discounted_inventory[product], key=lambda x: x[1]):
+                    days_left = expiry_day - self.current_day
+                    discount_msg = ""
+                    if days_left <= 2:
+                        discount_msg = "(50% OFF) ⚠️"
+                    elif days_left <= 5:
+                        discount_msg = "(20% OFF)"
+                    print(f"  - Qty: {qty:.0f} | Expires in: {days_left} days | Price: ₹{price:.2f} {discount_msg}")
+            else:
+                print(f"Product {product + 1}: No stock")
+
 
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
+        else:
+            print(f"Day {self.current_day} - Cash: ₹{self.cash_on_hand:.2f} | Waste Cost: ₹{self.total_waste_cost:.2f}")
 
     def _render_frame(self):
         plt.figure(figsize=(10, 6))
@@ -365,6 +485,8 @@ class SupplyChainEnv(gym.Env):
 
     def close(self):
         pass
+
+
 
 # --- Example Usage ---
 env = make_vec_env(lambda: SupplyChainEnv(render_mode=None), n_envs=1)
