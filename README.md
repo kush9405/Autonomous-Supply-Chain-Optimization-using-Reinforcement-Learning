@@ -21,7 +21,9 @@ git clone https://github.com/kush9405/Autonomous-Supply-Chain-Optimization-using
 cd Autonomous-Supply-Chain-Optimization-using-Reinforcement-Learning
 pip install -r requirements.txt
 ```
+in order to run the project use python version less than 3.12  as tensorboard is not supported  byt the higher versions at the time of this project
 
+if you run the project with tensorboard the data history will be recorded in a new directory called ppo_logs having subdirectories env_metrics and run_1_1
 ---
 
 ## Usage
