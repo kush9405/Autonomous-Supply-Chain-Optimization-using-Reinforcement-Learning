@@ -336,7 +336,7 @@ class SupplyChainEnv(gym.Env):
         demand = np.random.randint(AVG_DEMAND_PER_PRODUCT - DEMAND_STD_DEV, AVG_DEMAND_PER_PRODUCT + DEMAND_STD_DEV)
         return max(0, demand)  # Ensure non-negative demand
 
-    def _fulfill_demand(self):
+    def _f_demand(self):
         total_demand = 0
         total_revenue = 0
         # Sort products by price (descending) to prioritize high-revenue products
